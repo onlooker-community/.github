@@ -1,0 +1,144 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly even without code changes — catches new CVEs in deps
+    - cron: '0 6 * * 2'  # Tuesday 6am UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # for CodeQL SARIF upload
+
+jobs:
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    # Language-specific: use this job for TypeScript/Node repos
+    # For Go repos, use govulncheck-job instead
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: npm audit
+        run: |
+          # Fail on high and critical vulnerabilities
+          # Moderate vulnerabilities produce a warning but don't fail
+          npm audit --audit-level=high
+        continue-on-error: false
+
+      - name: Check for known-vulnerable packages
+        run: |
+          # Additional check using the OSV database
+          npx --yes better-npm-audit audit --level high
+        continue-on-error: true  # advisory only
+
+  govulncheck:
+    name: Go vulnerability check
+    runs-on: ubuntu-latest
+    # Language-specific: use this job for Go repos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  codeql:
+    name: CodeQL analysis
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Set this to the languages in your repo
+        # Options: 'go', 'javascript', 'typescript'
+        language: ['typescript']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Build (required for compiled languages)
+        if: matrix.language == 'go'
+        run: go build ./...
+
+      - name: Autobuild (for interpreted languages)
+        if: matrix.language != 'go'
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  secret-scan:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scanning
+
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+  supply-chain:
+    name: Supply chain integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify action pinning
+        run: |
+          # Check that all GitHub Actions are pinned to a commit SHA, not a tag
+          # Tags can be force-pushed; SHA pins are immutable
+          grep -rn 'uses:' .github/workflows/ | grep -v '#' | while read line; do
+            action=$(echo "$line" | grep -oP 'uses: \K[^\s]+')
+            if [[ "$action" =~ ^[^/]+/[^@]+@v ]]; then
+              echo "WARNING: Action $action is pinned to a tag, not a SHA"
+              echo "  Consider pinning to the commit SHA for supply chain security"
+              echo "  See: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions"
+            fi
+          done
+        continue-on-error: true  # Advisory for now
+
+  summary:
+    name: Security scan summary
+    runs-on: ubuntu-latest
+    needs: [dependency-audit, codeql, secret-scan]
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scan | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency audit | ${{ needs.dependency-audit.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CodeQL | ${{ needs.codeql.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret scanning | ${{ needs.secret-scan.result }} |" >> $GITHUB_STEP_SUMMARY

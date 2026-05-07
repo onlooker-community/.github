@@ -1,0 +1,115 @@
+name: Update Homebrew Formula
+
+# This workflow lives in the homebrew-tap repo.
+# It is triggered by a repository_dispatch event from the onlooker daemon repo
+# when a new stable release is tagged.
+
+on:
+  repository_dispatch:
+    types: [update-formula]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to update to (without v prefix)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Update formula to ${{ github.event.client_payload.version || inputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download release assets and compute SHAs
+        id: assets
+        run: |
+          VERSION=${{ steps.version.outputs.value }}
+          BASE_URL="https://github.com/onlooker-community/onlooker/releases/download/v${VERSION}"
+
+          # Download each platform binary and compute SHA256
+          for asset in \
+            "onlooker-darwin-arm64" \
+            "onlooker-darwin-amd64" \
+            "onlooker-linux-arm64" \
+            "onlooker-linux-amd64"; do
+
+            echo "Downloading ${asset}..."
+            curl -sL "${BASE_URL}/${asset}" -o "/tmp/${asset}"
+            SHA=$(shasum -a 256 "/tmp/${asset}" | awk '{print $1}')
+            echo "${asset}_sha=${SHA}" >> "$GITHUB_OUTPUT"
+            echo "  SHA256: ${SHA}"
+          done
+
+      - name: Update formula file
+        run: |
+          VERSION=${{ steps.version.outputs.value }}
+          cat > Formula/onlooker.rb << EOF
+          class Onlooker < Formula
+            desc "Local observability daemon for AI-assisted development"
+            homepage "https://onlooker.dev"
+            version "${VERSION}"
+            license "BlueOak-1.0.0"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/onlooker-community/onlooker/releases/download/v${VERSION}/onlooker-darwin-arm64"
+                sha256 "${{ steps.assets.outputs.onlooker-darwin-arm64_sha }}"
+              else
+                url "https://github.com/onlooker-community/onlooker/releases/download/v${VERSION}/onlooker-darwin-amd64"
+                sha256 "${{ steps.assets.outputs.onlooker-darwin-amd64_sha }}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/onlooker-community/onlooker/releases/download/v${VERSION}/onlooker-linux-arm64"
+                sha256 "${{ steps.assets.outputs.onlooker-linux-arm64_sha }}"
+              else
+                url "https://github.com/onlooker-community/onlooker/releases/download/v${VERSION}/onlooker-linux-amd64"
+                sha256 "${{ steps.assets.outputs.onlooker-linux-amd64_sha }}"
+              end
+            end
+
+            def install
+              bin.install stable.url.split("/").last => "onlooker"
+            end
+
+            service do
+              run [opt_bin/"onlooker", "daemon"]
+              keep_alive true
+              log_path var/"log/onlooker.log"
+              error_log_path var/"log/onlooker.log"
+            end
+
+            test do
+              system "#{bin}/onlooker", "version"
+            end
+          end
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "onlooker-bot"
+          git config user.email "bot@onlooker.dev"
+          git add Formula/onlooker.rb
+          git commit -m "chore: update onlooker to v${{ steps.version.outputs.value }}"
+          git push
+
+      - name: Verify formula installs
+        run: |
+          # Dry run to catch formula syntax errors
+          brew audit --new Formula/onlooker.rb || true

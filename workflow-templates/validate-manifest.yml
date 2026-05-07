@@ -1,0 +1,171 @@
+name: Validate Plugin Manifests
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/**/manifest.json'
+      - '.claude-plugin/schemas/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'plugins/**/manifest.json'
+      - '.claude-plugin/schemas/**'
+
+jobs:
+  validate-schema:
+    name: Validate manifests against schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate all manifests
+        run: |
+          npx --yes ajv-cli@5 validate \
+            --spec=draft2020 \
+            -s .claude-plugin/schemas/manifest.v1.json \
+            -d "plugins/*/manifest.json"
+
+  check-changed-manifests:
+    name: Check changed manifests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed manifest files
+        id: changed
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep 'plugins/.*/manifest.json' \
+            | tr '\n' ' ')
+          echo "files=${CHANGED}" >> "$GITHUB_OUTPUT"
+          echo "Changed manifests: ${CHANGED}"
+
+      - name: Check version bumps on manifest changes
+        if: steps.changed.outputs.files != ''
+        run: |
+          for manifest in ${{ steps.changed.outputs.files }}; do
+            PLUGIN=$(echo "$manifest" | cut -d'/' -f2)
+            echo "Checking version bump for plugin: $PLUGIN"
+
+            # Get the version in the PR
+            NEW_VERSION=$(node -p "require('./$manifest').version")
+
+            # Get the version on the base branch
+            git show origin/${{ github.base_ref }}:$manifest > /tmp/old_manifest.json 2>/dev/null || true
+            if [ -f /tmp/old_manifest.json ]; then
+              OLD_VERSION=$(node -p "require('/tmp/old_manifest.json').version")
+              echo "  Old version: $OLD_VERSION"
+              echo "  New version: $NEW_VERSION"
+
+              if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+                echo "  WARNING: manifest.json changed but version was not bumped"
+                echo "  If this is an intentional change, bump the version."
+                # This is a warning, not an error — let maintainers decide
+              fi
+            else
+              echo "  New plugin — no existing version to compare"
+            fi
+          done
+
+  check-unique-names:
+    name: Check plugin name uniqueness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for duplicate plugin names
+        run: |
+          node - << 'EOF'
+          const fs = require('fs')
+          const path = require('path')
+          const glob = require('glob').sync || (() => {
+            // Simple glob implementation if glob package not available
+            const dirs = fs.readdirSync('plugins')
+            return dirs.map(d => `plugins/${d}/manifest.json`).filter(f => fs.existsSync(f))
+          })()
+
+          const manifests = glob('plugins/*/manifest.json').map(f => ({
+            file: f,
+            manifest: JSON.parse(fs.readFileSync(f, 'utf8'))
+          }))
+
+          const names = {}
+          let hasDuplicate = false
+
+          for (const { file, manifest } of manifests) {
+            const name = manifest.name
+            if (names[name]) {
+              console.error(`Duplicate plugin name "${name}" found in:`)
+              console.error(`  ${names[name]}`)
+              console.error(`  ${file}`)
+              hasDuplicate = true
+            }
+            names[name] = file
+          }
+
+          if (hasDuplicate) process.exit(1)
+          console.log(`Checked ${manifests.length} manifests — all names are unique`)
+          EOF
+
+  check-hook-events:
+    name: Validate hook event types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check hook event types are valid
+        run: |
+          node - << 'EOF'
+          const fs = require('fs')
+
+          // Valid Claude Code hook event types
+          const VALID_HOOKS = new Set([
+            'SessionStart', 'SessionEnd', 'UserPromptSubmit',
+            'PreToolUse', 'PostToolUse', 'Stop', 'SubagentStart',
+            'SubagentStop', 'PreCompact', 'TaskCompleted',
+            'ConfigChange', 'InstructionsLoaded',
+            'WorktreeCreate', 'WorktreeRemove',
+          ])
+
+          const pluginDirs = fs.readdirSync('plugins')
+          let hasErrors = false
+
+          for (const plugin of pluginDirs) {
+            const manifestPath = `plugins/${plugin}/manifest.json`
+            if (!fs.existsSync(manifestPath)) continue
+
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+            const hooks = manifest.hooks || []
+
+            for (const hook of hooks) {
+              if (!VALID_HOOKS.has(hook.event)) {
+                console.error(`Plugin ${plugin}: unknown hook event "${hook.event}"`)
+                hasErrors = true
+              }
+            }
+          }
+
+          if (hasErrors) process.exit(1)
+          console.log('All hook event types are valid')
+          EOF
+
+  summary:
+    name: Manifest validation summary
+    runs-on: ubuntu-latest
+    needs: [validate-schema, check-changed-manifests, check-unique-names, check-hook-events]
+    if: always()
+    steps:
+      - name: Report results
+        run: |
+          echo "## Manifest Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Schema validation | ${{ needs.validate-schema.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version bump check | ${{ needs.check-changed-manifests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Name uniqueness | ${{ needs.check-unique-names.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hook event types | ${{ needs.check-hook-events.result }} |" >> $GITHUB_STEP_SUMMARY
