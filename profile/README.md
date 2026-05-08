@@ -47,6 +47,7 @@ Full documentation at [docs.onlooker.dev](https://docs.onlooker.dev).
 | Repo | Description |
 |------|-------------|
 | [onlooker](https://github.com/onlooker-community/onlooker) | Background daemon — telemetry collection and sync |
+| [website](https://github.com/onlooker-community/website) | The website at onlooker.dev |
 | [marketplace](https://github.com/onlooker-community/marketplace) | Official plugin marketplace |
 | [meridian](https://github.com/onlooker-community/meridian) | Agent intelligence suite — Waypoint, Scout, Beacon |
 | [schema](https://github.com/onlooker-community/schema) | Canonical event schema |
