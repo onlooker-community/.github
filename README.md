@@ -32,3 +32,5 @@ Interested in contributing? You're amazing, thank you :prayer:, find out more in
 ## License
 
 MIT license. For more information, see the [LICENSE file](./LICENSE)
+
+<!-- auto-merge probe, not for merge -->
